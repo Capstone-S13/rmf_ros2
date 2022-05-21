@@ -234,6 +234,22 @@ target_include_directories(custom_fleet_adapter
 
 # -----------------------------------------------------------------------------
 
+add_executable(internal_delivery src/internal_delivery/main.cpp)
+
+target_link_libraries(internal_delivery
+    rmf_fleet_adapter
+    ${rmf_fleet_msgs_LIBRARIES}
+    ${rmf_task_msgs_LIBRARIES}
+)
+
+target_include_directories(internal_delivery
+  PRIVATE
+    ${rmf_fleet_msgs_INCLUDE_DIRS}
+    ${rmf_task_msgs_INCLUDE_DIRS}
+)
+
+# -----------------------------------------------------------------------------
+
 add_executable(mock_traffic_light src/mock_traffic_light/main.cpp)
 
 target_link_libraries(mock_traffic_light
