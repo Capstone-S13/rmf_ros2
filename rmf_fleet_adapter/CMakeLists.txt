@@ -542,6 +542,7 @@ install(
     mock_traffic_light
     full_control
     custom_fleet_adapter
+    internal_delivery
     lift_supervisor
     experimental_lift_watchdog
     door_supervisor

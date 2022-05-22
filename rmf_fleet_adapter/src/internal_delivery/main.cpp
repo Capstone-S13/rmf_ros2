@@ -555,6 +555,7 @@ public:
       if (!self)
         return;
       // collect item from store
+      self->set_action_execution(execution);
 
     };
 
@@ -576,6 +577,7 @@ public:
       info << "depositing to unit " << description["unit"];
       message.data = info.str();
       self->_hello_pub->publish(message);
+      self->set_action_execution(execution);
 
     };
 
@@ -605,6 +607,7 @@ public:
         << "description: " << description["description"] << "to hub";
       message.data =  info.str();
       self->_hello_pub->publish(message);
+      self->set_action_execution(execution);
     };
 
     executor_map->emplace("hub_deposit", hub_deposit_executor);
@@ -632,6 +635,7 @@ public:
         << "description: " << description["description"] << "from hub";
       message.data =  info.str();
       self->_hello_pub->publish(message);
+      self->set_action_execution(execution);
     };
 
     executor_map->emplace("hub_collect", hub_collect_executor);
