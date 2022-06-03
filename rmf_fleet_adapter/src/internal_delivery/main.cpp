@@ -171,6 +171,9 @@ public:
   using HelloPub =
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr;
 
+  using PerformActionPub =
+    rclcpp::Publisher<std_msgs::msg::String>::SharedPtr;
+
   using ActionExecution =
     rmf_fleet_adapter::agv::RobotUpdateHandle::ActionExecution;
 
@@ -182,11 +185,13 @@ public:
     std::shared_ptr<const rmf_traffic::agv::VehicleTraits> traits,
     PathRequestPub path_request_pub,
     ModeRequestPub mode_request_pub,
-    HelloPub hello_pub)
+    HelloPub hello_pub,
+    PerformActionPub perform_action_pub)
   : _node(&node),
     _path_request_pub(std::move(path_request_pub)),
     _mode_request_pub(std::move(mode_request_pub)),
-    _hello_pub(std::move(hello_pub))
+    _hello_pub(std::move(hello_pub)),
+    _perform_action_pub(std::move(perform_action_pub))
   {
     _current_path_request.fleet_name = fleet_name;
     _current_path_request.robot_name = robot_name;
@@ -545,21 +550,36 @@ public:
     executor_map->emplace("teleop", teleop_executor);
 
     // set the action_executor to collect from a store
-    const auto store_collect_executor =
+    const auto unit_collect_executor =
       [w = weak_from_this()](
         const std::string&,
-        const nlohmann::json&,
+        const nlohmann::json& description,
         ActionExecution execution)
     {
       const auto self = w.lock();
       if (!self)
         return;
       // collect item from store
+
+      auto message = std_msgs::msg::String();
+      std::stringstream info;
+      info << "collecting " << description["description"]
+        << "of order id: " << description["id"] << "from unit";
+      message.data = info.str();
+      self->_hello_pub->publish(message);
+
+      // publish message for free fleet support
+      nlohmann::json json_msg;
+      json_msg["category"] = "unit_collect";
+      json_msg["description"] = description;
+      auto perform_action_msg = std_msgs::msg::String();
+      perform_action_msg.data = json_msg.dump();
+      self->_perform_action_pub->publish(perform_action_msg);
       self->set_action_execution(execution);
 
     };
 
-    executor_map->emplace("store_collect", store_collect_executor);
+    executor_map->emplace("unit_collect", unit_collect_executor);
 
     // set the action_executor to deposit to an unit
     const auto unit_deposit_executor =
@@ -574,9 +594,19 @@ public:
       // collect item from store
       auto message = std_msgs::msg::String();
       std::stringstream info;
-      info << "depositing to unit " << description["unit"];
+      info << "depositing " << description["description"]
+        << "of order id: " << description["id"] << "to unit";
       message.data = info.str();
       self->_hello_pub->publish(message);
+
+      // publish message for free fleet support
+      nlohmann::json json_msg;
+      json_msg["category"] = "unit_deposit";
+      json_msg["description"] = description;
+      auto perform_action_msg = std_msgs::msg::String();
+      perform_action_msg.data = json_msg.dump();
+      self->_perform_action_pub->publish(perform_action_msg);
+
       self->set_action_execution(execution);
 
     };
@@ -603,10 +633,19 @@ public:
       // 4. drop parcel into pigeon hole
       auto message = std_msgs::msg::String();
       std::stringstream info;
-      info << "depositing order " << "id: " << description["id"]
+      info << "depositing order of id: " << description["id"]
         << "description: " << description["description"] << "to hub";
       message.data =  info.str();
       self->_hello_pub->publish(message);
+
+      // publish message for free fleet support
+      nlohmann::json json_msg;
+      json_msg["category"] = "hub_deposit";
+      json_msg["description"] = description;
+      auto perform_action_msg = std_msgs::msg::String();
+      perform_action_msg.data = json_msg.dump();
+      self->_perform_action_pub->publish(perform_action_msg);
+
       self->set_action_execution(execution);
     };
 
@@ -635,6 +674,15 @@ public:
         << "description: " << description["description"] << "from hub";
       message.data =  info.str();
       self->_hello_pub->publish(message);
+
+      // publish message for free fleet support
+      nlohmann::json json_msg;
+      json_msg["category"] = "hub_collect";
+      json_msg["description"] = description;
+      auto perform_action_msg = std_msgs::msg::String();
+      perform_action_msg.data = json_msg.dump();
+      self->_perform_action_pub->publish(perform_action_msg);
+
       self->set_action_execution(execution);
     };
 
@@ -844,7 +892,9 @@ private:
   RequestCompleted _dock_finished_callback;
   ModeRequestPub _mode_request_pub;
 
+  // custom publishers
   HelloPub _hello_pub;
+  PerformActionPub _perform_action_pub;
 
   using Interruption = rmf_fleet_adapter::agv::RobotUpdateHandle::Interruption;
   std::unordered_map<std::string, Interruption> _interruptions;
@@ -911,6 +961,10 @@ struct Connections : public std::enable_shared_from_this<Connections>
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr
     hello_pub;
 
+  /// The publisher to support perform action on free fleet
+  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr
+    perform_action_pub;
+
   /// The topic subscription for ending teleop actions
   rclcpp::Subscription<rmf_fleet_msgs::msg::ModeRequest>::SharedPtr
     mode_request_sub;
@@ -944,7 +998,7 @@ struct Connections : public std::enable_shared_from_this<Connections>
     const auto& robot_name = state.name;
     const auto command = std::make_shared<FleetDriverRobotCommandHandle>(
       *adapter->node(), fleet_name, robot_name, graph, traits,
-      path_request_pub, mode_request_pub, hello_pub);
+      path_request_pub, mode_request_pub, hello_pub, perform_action_pub);
 
     const auto& l = state.location;
     const auto& starts = rmf_traffic::agv::compute_plan_starts(
@@ -1430,7 +1484,7 @@ std::shared_ptr<Connections> make_fleet(
     consider_hello);
 
   // Configure fleet to collect from stores
-  const auto consider_store_collect =
+  const auto consider_unit_collect =
     [](const nlohmann::json& /*description*/,
       rmf_fleet_adapter::agv::FleetUpdateHandle::Confirmation& confirm)
     {
@@ -1438,8 +1492,8 @@ std::shared_ptr<Connections> make_fleet(
     };
 
   connections->fleet->add_performable_action(
-    "store_collect",
-    consider_store_collect);
+    "unit_collect",
+    consider_unit_collect);
 
   // Configure fleet to deposit to units
   const auto consider_unit_deposit =
@@ -1499,6 +1553,10 @@ std::shared_ptr<Connections> make_fleet(
    connections->hello_pub = node->create_publisher<
     std_msgs::msg::String>(
     "Hello", rclcpp::SystemDefaultsQoS());
+
+  connections->perform_action_pub = node->create_publisher<
+    std_msgs::msg::String>(
+      fleet_name + "/perform_action", rclcpp::SystemDefaultsQoS());
 
   connections->fleet_state_sub = node->create_subscription<
     rmf_fleet_msgs::msg::FleetState>(
