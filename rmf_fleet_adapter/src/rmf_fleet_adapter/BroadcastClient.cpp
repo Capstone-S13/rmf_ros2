@@ -91,23 +91,30 @@ std::shared_ptr<BroadcastClient> BroadcastClient::make(
           websocketpp::lib::error_code ec;
           WebsocketClient::connection_ptr con = c->_client.get_connection(
             c->_uri, ec);
-          c->_hdl = con->get_handle();
-          c->_client.connect(con);
-          // TOD(YV): Without sending a test payload, ec seems to be 0 even
-          // when the client has not connected. Avoid sending this message.
-          c->_client.send(c->_hdl, "Hello", websocketpp::frame::opcode::text,
-          ec);
-          if (ec)
+
+          if (con)
+          {
+            c->_hdl = con->get_handle();
+            c->_client.connect(con);
+            // TOD(YV): Without sending a test payload, ec seems to be 0 even
+            // when the client has not connected. Avoid sending this message.
+            c->_client.send(c->_hdl, "Hello", websocketpp::frame::opcode::text,
+            ec);
+          }
+
+          if (!con || ec)
           {
             RCLCPP_WARN(
               impl.node->get_logger(),
               "BroadcastClient unable to connect to [%s]. Please make sure "
-              "server is running.",
-              c->_uri.c_str());
+              "server is running. Error msg: %s",
+              c->_uri.c_str(),
+              ec.message().c_str());
             c->_connected = false;
             std::this_thread::sleep_for(std::chrono::milliseconds(2000));
             continue;
           }
+
           RCLCPP_INFO(
             impl.node->get_logger(),
             "BroadcastClient successfully connected to [%s]",
@@ -149,6 +156,17 @@ std::shared_ptr<BroadcastClient> BroadcastClient::make(
 //==============================================================================
 void BroadcastClient::publish(const nlohmann::json& msg)
 {
+  {
+    const auto fleet = _fleet_handle.lock();
+    if (!fleet)
+      return;
+
+    auto& impl = agv::FleetUpdateHandle::Implementation::get(*fleet);
+    std::unique_lock<std::mutex> lock(*impl.update_callback_mutex);
+    if (impl.update_callback)
+      impl.update_callback(msg);
+  }
+
   std::lock_guard<std::mutex> lock(_queue_mutex);
   _queue.push(msg);
   _cv.notify_all();
@@ -157,6 +175,20 @@ void BroadcastClient::publish(const nlohmann::json& msg)
 //==============================================================================
 void BroadcastClient::publish(const std::vector<nlohmann::json>& msgs)
 {
+  {
+    const auto fleet = _fleet_handle.lock();
+    if (!fleet)
+      return;
+
+    auto& impl = agv::FleetUpdateHandle::Implementation::get(*fleet);
+    std::unique_lock<std::mutex> lock(*impl.update_callback_mutex);
+    if (impl.update_callback)
+    {
+      for (const auto& msg : msgs)
+        impl.update_callback(msg);
+    }
+  }
+
   std::lock_guard<std::mutex> lock(_queue_mutex);
   for (const auto& msg : msgs)
     _queue.push(msg);

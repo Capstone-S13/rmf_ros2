@@ -19,6 +19,7 @@
 #define SRC__RMF_FLEET_ADAPTER__SERVICES__DETAIL__IMPL_NEGOTIATE_HPP
 
 #include "../Negotiate.hpp"
+#include "../../project_itinerary.hpp"
 
 namespace rmf_fleet_adapter {
 namespace services {
@@ -68,29 +69,33 @@ void Negotiate::operator()(const Subscriber& s)
   for (const auto& job : _queued_jobs)
     job->progress().options().maximum_cost_estimate(initial_max_cost);
 
-  // It's technically okay for us to capture `this` by value here because this
-  // lambda will only be used in the callback of _search_sub below, which will
-  // capture `this` instance by weak_ptr and lock that weak_ptr before
-  // attempting to call the check_if_finished lambda.
-  auto check_if_finished = [this, s, N_jobs]() -> bool
+  auto check_if_finished = [w = weak_from_this(), s, N_jobs]() -> bool
     {
-      if (_finished)
+      const auto self = w.lock();
+      if (!self)
         return true;
 
-      if (_evaluator.finished_count >= N_jobs || *_interrupted)
+      if (self->_finished)
+        return true;
+
+      if (self->_evaluator.finished_count >= N_jobs || *self->_interrupted)
       {
-        if (_evaluator.best_result.progress
-          && _evaluator.best_result.progress->success())
+        if (self->_evaluator.best_result.progress
+          && self->_evaluator.best_result.progress->success())
         {
-          _finished = true;
+          self->_finished = true;
           // This means we found a successful plan to submit to the negotiation.
           s.on_next(
             Result{
-              shared_from_this(),
-              [r = *_evaluator.best_result.progress,
-              initial_itinerary = std::move(_initial_itinerary),
-              approval = std::move(_approval),
-              responder = _responder]()
+              self->shared_from_this(),
+              [r = *self->_evaluator.best_result.progress,
+              initial_itinerary = std::move(self->_initial_itinerary),
+              followed_by = self->_followed_by,
+              planner = self->_planner,
+              approval = std::move(self->_approval),
+              responder = self->_responder,
+              viewer = self->_viewer,
+              plan_id = self->_plan_id]()
               {
                 std::vector<rmf_traffic::Route> final_itinerary;
                 final_itinerary.reserve(
@@ -105,13 +110,43 @@ void Negotiate::operator()(const Subscriber& s)
                   }
                 }
 
+                final_itinerary = project_itinerary(*r, followed_by, *planner);
+                for (const auto& parent : viewer->base_proposals())
+                {
+                  // Make sure all parent dependencies are accounted for
+                  // TODO(MXG): This is kind of a gross hack that we add to
+                  // force the lookahead to work for patrols. This approach
+                  // should be reworked in a future redesign of the traffic
+                  // system.
+                  for (auto& r : final_itinerary)
+                  {
+                    for (std::size_t i = 0; i < parent.itinerary.size(); ++i)
+                    {
+                      r.add_dependency(
+                        r.trajectory().size(),
+                        rmf_traffic::Dependency{
+                          parent.participant,
+                          parent.plan,
+                          i,
+                          parent.itinerary[i].trajectory().size()
+                        });
+                    }
+                  }
+                }
+
                 responder->submit(
-                  std::move(final_itinerary),
-                  [plan = *r, approval = std::move(approval)]()
+                  plan_id,
+                  final_itinerary,
+                  [
+                    plan_id,
+                    plan = *r,
+                    approval = std::move(approval),
+                    final_itinerary
+                  ]()
                   -> UpdateVersion
                   {
                     if (approval)
-                      return approval(plan);
+                      return approval(plan_id, plan, final_itinerary);
 
                     return rmf_utils::nullopt;
                   });
@@ -119,36 +154,36 @@ void Negotiate::operator()(const Subscriber& s)
             });
 
           s.on_completed();
-          this->interrupt();
+          self->interrupt();
           return true;
         }
-        else if (_alternatives && !_alternatives->empty())
+        else if (self->_alternatives && !self->_alternatives->empty())
         {
-          _finished = true;
+          self->_finished = true;
           // This means we could not find a successful plan, but we have some
           // alternatives to offer the parent in the negotiation.
           s.on_next(
             Result{
-              shared_from_this(),
-              [alts = *_alternatives, responder = _responder]()
+              self->shared_from_this(),
+              [alts = *self->_alternatives, responder = self->_responder]()
               {
                 responder->reject(alts);
               }
             });
 
           s.on_completed();
-          this->interrupt();
+          self->interrupt();
           return true;
         }
-        else if (!_attempting_rollout)
+        else if (!self->_attempting_rollout)
         {
-          _finished = true;
+          self->_finished = true;
           // This means we could not find any plan or any alternatives to offer
           // the parent, so all we can do is forfeit.
           s.on_next(
             Result{
-              shared_from_this(),
-              [n = shared_from_this()]()
+              self->shared_from_this(),
+              [n = self->shared_from_this()]()
               {
                 std::vector<rmf_traffic::schedule::ParticipantId> blockers(
                   n->_blockers.begin(), n->_blockers.end());
@@ -158,7 +193,7 @@ void Negotiate::operator()(const Subscriber& s)
             });
 
           s.on_completed();
-          this->interrupt();
+          self->interrupt();
           return true;
         }
 

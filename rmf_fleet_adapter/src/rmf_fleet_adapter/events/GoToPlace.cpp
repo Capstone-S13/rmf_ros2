@@ -16,6 +16,7 @@
 */
 
 #include "GoToPlace.hpp"
+#include "../project_itinerary.hpp"
 
 #include <rmf_traffic/schedule/StubbornNegotiator.hpp>
 
@@ -67,6 +68,7 @@ auto GoToPlace::Standby::make(
   const auto header = description.generate_header(state, *parameters);
 
   auto standby = std::make_shared<Standby>(Standby{description.destination()});
+  standby->_followed_by = description.expected_next_destinations();
   standby->_assign_id = id;
   standby->_context = context;
   standby->_time_estimate = header.original_duration_estimate();
@@ -113,6 +115,7 @@ auto GoToPlace::Standby::begin(
       _assign_id,
       _context,
       _goal,
+      _followed_by,
       _tail_period,
       _state,
       _update,
@@ -127,12 +130,14 @@ auto GoToPlace::Active::make(
   const AssignIDPtr& id,
   agv::RobotContextPtr context,
   rmf_traffic::agv::Plan::Goal goal,
+  std::vector<rmf_traffic::agv::Plan::Goal> followed_by,
   std::optional<rmf_traffic::Duration> tail_period,
   rmf_task::events::SimpleEventStatePtr state,
   std::function<void()> update,
   std::function<void()> finished) -> std::shared_ptr<Active>
 {
   auto active = std::make_shared<Active>(Active(std::move(goal)));
+  active->_followed_by = std::move(followed_by);
   active->_assign_id = id;
   active->_context = std::move(context);
   active->_tail_period = tail_period;
@@ -150,6 +155,23 @@ auto GoToPlace::Active::make(
 
       r->forfeit({});
       return nullptr;
+    });
+
+  active->_replan_request_subscription =
+    active->_context->observe_replan_request()
+    .observe_on(rxcpp::identity_same_worker(active->_context->worker()))
+    .subscribe(
+    [w = active->weak_from_this()](const auto&)
+    {
+      const auto self = w.lock();
+      if (self && !self->_find_path_service)
+      {
+        RCLCPP_INFO(
+          self->_context->node()->get_logger(),
+          "Replanning requested for [%s]",
+          self->_context->requester_id().c_str());
+        self->_find_plan();
+      }
     });
 
   active->_find_plan();
@@ -196,16 +218,11 @@ auto GoToPlace::Active::interrupt(std::function<void()> task_is_interrupted)
 {
   _negotiator->clear_license();
   _is_interrupted = true;
-  _execution = std::nullopt;
+  _stop_and_clear();
 
   _state->update_status(Status::Standby);
   _state->update_log().info("Going into standby for an interruption");
   _state->update_dependencies({});
-
-  if (const auto command = _context->command())
-    command->stop();
-
-  _context->itinerary().clear();
 
   _context->worker().schedule(
     [task_is_interrupted](const auto&)
@@ -228,7 +245,7 @@ auto GoToPlace::Active::interrupt(std::function<void()> task_is_interrupted)
 //==============================================================================
 void GoToPlace::Active::cancel()
 {
-  _execution = std::nullopt;
+  _stop_and_clear();
   _state->update_status(Status::Canceled);
   _state->update_log().info("Received signal to cancel");
   _finished();
@@ -237,7 +254,7 @@ void GoToPlace::Active::cancel()
 //==============================================================================
 void GoToPlace::Active::kill()
 {
-  _execution = std::nullopt;
+  _stop_and_clear();
   _state->update_status(Status::Killed);
   _state->update_log().info("Received signal to kill");
   _finished();
@@ -324,7 +341,14 @@ void GoToPlace::Active::_find_plan()
         "Found a plan to move from ["
         + start_name + "] to [" + goal_name + "]");
 
-      self->_execute_plan(*std::move(result));
+      auto full_itinerary = project_itinerary(
+        *result, self->_followed_by, *self->_context->planner());
+
+      self->_execute_plan(
+        self->_context->itinerary().assign_plan_id(),
+        *std::move(result),
+        std::move(full_itinerary));
+
       self->_find_path_service = nullptr;
       self->_retry_timer = nullptr;
     });
@@ -377,20 +401,26 @@ void GoToPlace::Active::_schedule_retry()
 }
 
 //==============================================================================
-void GoToPlace::Active::_execute_plan(rmf_traffic::agv::Plan plan)
+void GoToPlace::Active::_execute_plan(
+  const rmf_traffic::PlanId plan_id,
+  rmf_traffic::agv::Plan plan,
+  rmf_traffic::schedule::Itinerary full_itinerary)
 {
   if (_is_interrupted)
     return;
 
-  if (plan.get_itinerary().empty())
+  if (plan.get_itinerary().empty() || plan.get_waypoints().empty())
   {
+    _state->update_status(Status::Completed);
+    _state->update_log().info(
+      "The planner indicates that the robot is already at its goal.");
     _finished();
     return;
   }
 
   _execution = ExecutePlan::make(
-    _context, std::move(plan), _assign_id, _state,
-    _update, _finished, _tail_period);
+    _context, plan_id, std::move(plan), std::move(full_itinerary),
+    _assign_id, _state, _update, _finished, _tail_period);
 
   if (!_execution.has_value())
   {
@@ -403,24 +433,29 @@ void GoToPlace::Active::_execute_plan(rmf_traffic::agv::Plan plan)
 }
 
 //==============================================================================
+void GoToPlace::Active::_stop_and_clear()
+{
+  _execution = std::nullopt;
+  if (const auto command = _context->command())
+    command->stop();
+
+  _context->itinerary().clear();
+}
+
+//==============================================================================
 Negotiator::NegotiatePtr GoToPlace::Active::_respond(
   const Negotiator::TableViewerPtr& table_view,
   const Negotiator::ResponderPtr& responder)
 {
-  if (_context->is_stubborn())
-  {
-    rmf_traffic::schedule::StubbornNegotiator(_context->itinerary())
-    .respond(table_view, responder);
-    return nullptr;
-  }
-
   auto approval_cb = [w = weak_from_this()](
-    const rmf_traffic::agv::Plan& plan)
+    const rmf_traffic::PlanId plan_id,
+    const rmf_traffic::agv::Plan& plan,
+    rmf_traffic::schedule::Itinerary itinerary)
     -> std::optional<rmf_traffic::schedule::ItineraryVersion>
     {
       if (auto self = w.lock())
       {
-        self->_execute_plan(plan);
+        self->_execute_plan(plan_id, plan, std::move(itinerary));
         return self->_context->itinerary().version();
       }
 
@@ -429,7 +464,8 @@ Negotiator::NegotiatePtr GoToPlace::Active::_respond(
 
   const auto evaluator = Negotiator::make_evaluator(table_view);
   return services::Negotiate::path(
-    _context->planner(), _context->location(), _goal, table_view,
+    _context->itinerary().assign_plan_id(), _context->planner(),
+    _context->location(), _goal, _followed_by, table_view,
     responder, std::move(approval_cb), std::move(evaluator));
 }
 

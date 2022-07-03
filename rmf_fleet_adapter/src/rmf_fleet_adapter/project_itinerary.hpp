@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 Open Source Robotics Foundation
+ * Copyright (C) 2022 Open Source Robotics Foundation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,31 +15,20 @@
  *
 */
 
-#ifndef SRC__RMF_FLEET_ADAPTER__TASKS__CLEAN_HPP
-#define SRC__RMF_FLEET_ADAPTER__TASKS__CLEAN_HPP
+#ifndef SRC__RMF_FLEET_ADAPTER__PROJECT_ITINERARY_HPP
+#define SRC__RMF_FLEET_ADAPTER__PROJECT_ITINERARY_HPP
 
-#include "../agv/RobotContext.hpp"
-
+#include <rmf_traffic/schedule/Itinerary.hpp>
 #include <rmf_traffic/agv/Planner.hpp>
-#include <rmf_traffic/Time.hpp>
-
-#include <rmf_task_sequence/Phase.hpp>
-#include <rmf_task_sequence/Event.hpp>
-
-#include "../agv/internal_FleetUpdateHandle.hpp"
 
 namespace rmf_fleet_adapter {
-namespace tasks {
 
 //==============================================================================
-void add_clean(
-  const agv::FleetUpdateHandle::Implementation::ConstDockParamsPtr& dock_params,
-  const rmf_traffic::agv::VehicleTraits& traits,
-  agv::TaskDeserialization& deserialization,
-  agv::TaskActivation& activation,
-  std::function<rmf_traffic::Time()> clock);
+rmf_traffic::schedule::Itinerary project_itinerary(
+  const rmf_traffic::agv::Plan& starting_from,
+  const std::vector<rmf_traffic::agv::Plan::Goal>& through_destinations,
+  const rmf_traffic::agv::Planner& with_planner);
 
-} // namespace tasks
 } // namespace rmf_fleet_adapter
 
-#endif // SRC__RMF_FLEET_ADAPTER__TASKS__CLEAN_HPP
+#endif // SRC__RMF_FLEET_ADAPTER__PROJECT_ITINERARY_HPP

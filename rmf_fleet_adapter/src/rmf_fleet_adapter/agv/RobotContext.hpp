@@ -24,7 +24,7 @@
 
 #include <rmf_traffic/schedule/Negotiator.hpp>
 #include <rmf_traffic/schedule/Participant.hpp>
-#include <rmf_traffic/schedule/Snapshot.hpp>
+#include <rmf_traffic/schedule/Mirror.hpp>
 
 #include <rmf_task/State.hpp>
 #include <rmf_task/Constraints.hpp>
@@ -85,10 +85,10 @@ public:
   /// Get a const-reference to the schedule of this robot
   const rmf_traffic::schedule::Participant& itinerary() const;
 
-  using Snappable = rmf_traffic::schedule::Snappable;
+  using Mirror = rmf_traffic::schedule::Mirror;
   /// Get a const-reference to an interface that lets you get a snapshot of the
   /// schedule.
-  const std::shared_ptr<const Snappable>& schedule() const;
+  const std::shared_ptr<const Mirror>& schedule() const;
 
   /// Get the schedule description of this robot
   const rmf_traffic::schedule::ParticipantDescription& description() const;
@@ -127,9 +127,9 @@ public:
   bool is_stubborn() const;
 
   struct Empty {};
-  const rxcpp::observable<Empty>& observe_interrupt() const;
+  const rxcpp::observable<Empty>& observe_replan_request() const;
 
-  void trigger_interrupt();
+  void request_replan();
 
   /// Get a reference to the rclcpp node
   const std::shared_ptr<Node>& node();
@@ -204,10 +204,19 @@ public:
 
   /// Set the current mode of the robot. This mode should correspond to a
   /// constant in the RobotMode message
+  [[deprecated]]
   void current_mode(uint32_t mode);
 
   /// Return the current mode of the robot
+  [[deprecated]]
   uint32_t current_mode() const;
+
+  /// Set the current mode of the robot.
+  /// Specify a valid string as specified in the robot_state.json schema
+  void override_status(std::optional<std::string> status);
+
+  /// Return the current mode of the robot
+  std::optional<std::string> override_status() const;
 
   /// Set the action executor for requesting this robot to execute a
   /// PerformAction activity
@@ -233,7 +242,7 @@ private:
     std::shared_ptr<RobotCommandHandle> command_handle,
     std::vector<rmf_traffic::agv::Plan::Start> _initial_location,
     rmf_traffic::schedule::Participant itinerary,
-    std::shared_ptr<const Snappable> schedule,
+    std::shared_ptr<const Mirror> schedule,
     std::shared_ptr<std::shared_ptr<const rmf_traffic::agv::Planner>> planner,
     rmf_task::ConstActivatorPtr activator,
     rmf_task::ConstParametersPtr parameters,
@@ -250,7 +259,7 @@ private:
   std::weak_ptr<RobotCommandHandle> _command_handle;
   std::vector<rmf_traffic::agv::Plan::Start> _location;
   rmf_traffic::schedule::Participant _itinerary;
-  std::shared_ptr<const Snappable> _schedule;
+  std::shared_ptr<const Mirror> _schedule;
   std::shared_ptr<std::shared_ptr<const rmf_traffic::agv::Planner>> _planner;
   rmf_task::ConstActivatorPtr _task_activator;
   rmf_task::ConstParametersPtr _task_parameters;
@@ -284,6 +293,7 @@ private:
 
   // Mode value for RobotMode message
   uint32_t _current_mode;
+  std::optional<std::string> _override_status;
 
   RobotUpdateHandle::ActionExecutor _action_executor;
   Reporting _reporting;

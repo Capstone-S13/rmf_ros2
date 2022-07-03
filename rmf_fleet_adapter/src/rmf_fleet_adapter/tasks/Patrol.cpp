@@ -15,9 +15,9 @@
  *
 */
 
-#include "Loop.hpp"
+#include "Patrol.hpp"
 
-#include "../phases/GoToPlace.hpp"
+#include <rmf_task/requests/Loop.hpp>
 
 #include <rmf_task_sequence/Task.hpp>
 #include <rmf_task_sequence/phases/SimplePhase.hpp>
@@ -30,94 +30,7 @@ namespace rmf_fleet_adapter {
 namespace tasks {
 
 //==============================================================================
-std::shared_ptr<LegacyTask> make_loop(
-  const rmf_task::ConstRequestPtr request,
-  const agv::RobotContextPtr& context,
-  const rmf_traffic::agv::Plan::Start start,
-  const rmf_traffic::Time deployment_time,
-  const rmf_task::State finish_state)
-{
-  std::shared_ptr<const rmf_task::requests::Loop::Description> description =
-    std::dynamic_pointer_cast<
-    const rmf_task::requests::Loop::Description>(request->description());
-
-  if (description == nullptr)
-    return nullptr;
-
-  const auto start_waypoint = description->start_waypoint();
-  const auto finish_waypoint = description->finish_waypoint();
-
-  const auto loop_start = [&]() -> rmf_traffic::agv::Planner::Start
-    {
-      if (start.waypoint() == start_waypoint)
-        return start;
-
-      rmf_traffic::agv::Planner::Goal goal{start_waypoint};
-
-      const auto result = context->planner()->plan(start, goal);
-      // We assume we can always compute a plan
-      const auto& trajectory =
-        result->get_itinerary().back().trajectory();
-      const auto& finish_time = *trajectory.finish_time();
-      const double orientation = trajectory.back().position()[2];
-
-      return rmf_traffic::agv::Planner::Start{
-      finish_time,
-      start_waypoint,
-      orientation};
-    } ();
-
-  const auto loop_end = [&]() -> rmf_traffic::agv::Planner::Start
-    {
-      if (loop_start.waypoint() == finish_waypoint)
-        return loop_start;
-
-      rmf_traffic::agv::Planner::Goal goal{finish_waypoint};
-
-      const auto result = context->planner()->plan(loop_start, goal);
-      // We assume we can always compute a plan
-      const auto& trajectory =
-        result->get_itinerary().back().trajectory();
-      const auto& finish_time = *trajectory.finish_time();
-      const double orientation = trajectory.back().position()[2];
-
-      return rmf_traffic::agv::Planner::Start{
-      finish_time,
-      finish_waypoint,
-      orientation};
-    } ();
-
-  LegacyTask::PendingPhases phases;
-  phases.push_back(
-    phases::GoToPlace::make(
-      context, std::move(start), start_waypoint));
-
-  phases.push_back(
-    phases::GoToPlace::make(
-      context, loop_start, finish_waypoint));
-
-  for (std::size_t i = 1; i < description->num_loops(); ++i)
-  {
-    phases.push_back(
-      phases::GoToPlace::make(
-        context, loop_end, start_waypoint));
-
-    phases.push_back(
-      phases::GoToPlace::make(
-        context, loop_start, finish_waypoint));
-  }
-
-  return LegacyTask::make(
-    request->booking()->id(),
-    std::move(phases),
-    context->worker(),
-    deployment_time,
-    finish_state,
-    request);
-}
-
-//==============================================================================
-void add_loop(
+void add_patrol(
   agv::TaskDeserialization& deserialization,
   agv::TaskActivation& activation,
   std::function<rmf_traffic::Time()> clock)
@@ -136,15 +49,40 @@ void add_loop(
     [place_deser = deserialization.place](const nlohmann::json& msg)
     -> agv::DeserializedEvent
     {
-      auto place = place_deser(msg);
+      nlohmann::json place_msg;
+      const auto place_it = msg.find("place");
+      if (place_it == msg.end())
+        place_msg = msg;
+      else
+        place_msg = place_it.value();
+
+      auto place = place_deser(place_msg);
       if (!place.description.has_value())
         return {nullptr, std::move(place.errors)};
 
+      const auto desc =
+        GoToPlace::Description::make(std::move(*place.description));
+
+      const auto followed_by_it = msg.find("followed_by");
+      if (followed_by_it != msg.end())
+      {
+        std::vector<rmf_traffic::agv::Plan::Goal> followed_by;
+        for (const auto& f_msg : followed_by_it.value())
+        {
+          auto f = place_deser(f_msg);
+          place.errors.insert(
+            place.errors.end(), f.errors.begin(), f.errors.end());
+
+          if (!f.description.has_value())
+            return {nullptr, place.errors};
+
+          followed_by.push_back(*f.description);
+        }
+        desc->expected_next_destinations(std::move(followed_by));
+      }
+
       /* *INDENT-OFF* */
-      return {
-        GoToPlace::Description::make(std::move(*place.description)),
-        std::move(place.errors)
-      };
+      return {desc, std::move(place.errors)};
       /* *INDENT-ON* */
     };
 
@@ -206,10 +144,14 @@ void add_loop(
       rmf_task_sequence::Task::Builder builder;
       for (std::size_t i = 0; i < rounds; ++i)
       {
-        for (const auto& place : places)
+        for (std::size_t j = 0; j < places.size(); ++j)
         {
-          builder.add_phase(
-            Phase::Description::make(GoToPlace::Description::make(place)), {});
+          const auto& place = places[j];
+          auto go_to_place = GoToPlace::Description::make(place);
+          auto next = places;
+          next.erase(next.begin(), next.begin() + j + 1);
+          go_to_place->expected_next_destinations(std::move(next));
+          builder.add_phase(Phase::Description::make(go_to_place), {});
         }
       }
 

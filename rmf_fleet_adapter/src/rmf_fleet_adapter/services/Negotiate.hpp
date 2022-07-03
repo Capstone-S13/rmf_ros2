@@ -34,12 +34,18 @@ public:
   using ItineraryVersion = rmf_traffic::schedule::ItineraryVersion;
   using UpdateVersion = rmf_utils::optional<ItineraryVersion>;
   using ApprovalCallback =
-    std::function<UpdateVersion(const rmf_traffic::agv::Plan&)>;
+    std::function<UpdateVersion(
+        rmf_traffic::PlanId,
+        const rmf_traffic::agv::Plan&,
+        rmf_traffic::schedule::Itinerary)
+    >;
 
   Negotiate(
+    rmf_traffic::PlanId assigned_id,
     std::shared_ptr<const rmf_traffic::agv::Planner> planner,
     rmf_traffic::agv::Plan::StartSet starts,
     std::vector<rmf_traffic::agv::Plan::Goal> goals,
+    std::vector<rmf_traffic::agv::Plan::Goal> followed_by,
     rmf_traffic::schedule::Negotiator::TableViewerPtr viewer,
     rmf_traffic::schedule::Negotiator::ResponderPtr responder,
     ApprovalCallback approval,
@@ -47,9 +53,11 @@ public:
     std::vector<rmf_traffic::Route> initial_itinerary = {});
 
   static std::shared_ptr<Negotiate> path(
+    rmf_traffic::PlanId plan_id,
     std::shared_ptr<const rmf_traffic::agv::Planner> planner,
     rmf_traffic::agv::Plan::StartSet starts,
     rmf_traffic::agv::Plan::Goal goal,
+    std::vector<rmf_traffic::agv::Plan::Goal> followed_by,
     rmf_traffic::schedule::Negotiator::TableViewerPtr viewer,
     rmf_traffic::schedule::Negotiator::ResponderPtr responder,
     ApprovalCallback approval,
@@ -57,6 +65,7 @@ public:
     std::vector<rmf_traffic::Route> initial_itinerary = {});
 
   static std::shared_ptr<Negotiate> emergency_pullover(
+    rmf_traffic::PlanId plan_id,
     std::shared_ptr<const rmf_traffic::agv::Planner> planner,
     rmf_traffic::agv::Plan::StartSet starts,
     rmf_traffic::schedule::Negotiation::Table::ViewerPtr viewer,
@@ -87,9 +96,11 @@ private:
 
   void _resume_next();
 
+  rmf_traffic::PlanId _plan_id;
   std::shared_ptr<const rmf_traffic::agv::Planner> _planner;
   rmf_traffic::agv::Plan::StartSet _starts;
   std::vector<rmf_traffic::agv::Plan::Goal> _goals;
+  std::vector<rmf_traffic::agv::Plan::Goal> _followed_by;
   rmf_traffic::schedule::Negotiator::TableViewerPtr _viewer;
   rmf_traffic::schedule::Negotiator::ResponderPtr _responder;
   ApprovalCallback _approval;

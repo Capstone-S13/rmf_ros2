@@ -27,11 +27,12 @@
 
 #include "../log_to_json.hpp"
 #include "../tasks/Delivery.hpp"
-#include "../tasks/Loop.hpp"
+#include "../tasks/Patrol.hpp"
 #include "../tasks/Clean.hpp"
 #include "../tasks/ChargeBattery.hpp"
 #include "../tasks/Compose.hpp"
 #include "../events/GoToPlace.hpp"
+#include "../events/ResponsiveWait.hpp"
 #include "../events/PerformAction.hpp"
 
 #include <rmf_task/Constraints.hpp>
@@ -740,13 +741,14 @@ get_nearest_charger(
 
 namespace {
 //==============================================================================
-rmf_fleet_msgs::msg::Location convert_location(const agv::RobotContext& context)
+std::optional<rmf_fleet_msgs::msg::Location> convert_location(
+  const agv::RobotContext& context)
 {
   if (context.location().empty())
   {
     // TODO(MXG): We should emit some kind of critical error if this ever
     // happens
-    return rmf_fleet_msgs::msg::Location();
+    return std::nullopt;
   }
 
   const auto& graph = context.planner()->get_configuration().graph();
@@ -768,9 +770,13 @@ rmf_fleet_msgs::msg::Location convert_location(const agv::RobotContext& context)
 }
 
 //==============================================================================
-rmf_fleet_msgs::msg::RobotState convert_state(const TaskManager& mgr)
+std::optional<rmf_fleet_msgs::msg::RobotState> convert_state(
+  const TaskManager& mgr)
 {
   const RobotContext& context = *mgr.context();
+  const auto location = convert_location(context);
+  if (!location.has_value())
+    return std::nullopt;
 
   const auto mode = mgr.robot_mode();
 
@@ -785,7 +791,7 @@ rmf_fleet_msgs::msg::RobotState convert_state(const TaskManager& mgr)
     .mode(std::move(mode))
     // We multiply by 100 to convert from the [0.0, 1.0] range to percentage
     .battery_percent(context.current_battery_soc()*100.0)
-    .location(convert_location(context))
+    .location(*location)
     // NOTE(MXG): The path field is only used by the fleet drivers. For now,
     // we will just fill it with a zero. We could consider filling it in based
     // on the robot's plan, but that seems redundant with the traffic schedule
@@ -799,7 +805,13 @@ void FleetUpdateHandle::Implementation::publish_fleet_state_topic() const
 {
   std::vector<rmf_fleet_msgs::msg::RobotState> robot_states;
   for (const auto& [context, mgr] : task_managers)
-    robot_states.emplace_back(convert_state(*mgr));
+  {
+    auto state = convert_state(*mgr);
+    if (!state.has_value())
+      continue;
+
+    robot_states.emplace_back(std::move(*state));
+  }
 
   auto fleet_state = rmf_fleet_msgs::build<rmf_fleet_msgs::msg::FleetState>()
     .name(name)
@@ -840,10 +852,13 @@ void FleetUpdateHandle::Implementation::update_fleet_state() const
 
       nlohmann::json& location = json["location"];
       const auto location_msg = convert_location(*context);
-      location["map"] = location_msg.level_name;
-      location["x"] = location_msg.x;
-      location["y"] = location_msg.y;
-      location["yaw"] = location_msg.yaw;
+      if (!location_msg.has_value())
+        continue;
+
+      location["map"] = location_msg->level_name;
+      location["x"] = location_msg->x;
+      location["y"] = location_msg->y;
+      location["yaw"] = location_msg->yaw;
 
       std::lock_guard<std::mutex> lock(context->reporting().mutex());
       const auto& issues = context->reporting().open_issues();
@@ -1036,12 +1051,14 @@ void FleetUpdateHandle::Implementation::add_standard_tasks()
   deserialization.place = make_place_deserializer(planner);
   deserialization.add_schema(schemas::place);
 
+  events::ResponsiveWait::add(*activation.event);
+
   tasks::add_delivery(
     deserialization,
     activation,
     node->clock());
 
-  tasks::add_loop(
+  tasks::add_patrol(
     deserialization,
     activation,
     node->clock());
@@ -1259,7 +1276,7 @@ void FleetUpdateHandle::add_robot(
           std::move(command),
           std::move(start),
           std::move(participant),
-          fleet->_pimpl->snappable,
+          fleet->_pimpl->mirror,
           fleet->_pimpl->planner,
           fleet->_pimpl->activation.task,
           fleet->_pimpl->task_parameters,
@@ -1332,7 +1349,7 @@ void FleetUpdateHandle::add_robot(
                   }
 
                   last_time = now;
-                  c->trigger_interrupt();
+                  c->request_replan();
                 }
               });
           }
@@ -1783,6 +1800,15 @@ FleetUpdateHandle& FleetUpdateHandle::fleet_state_update_period(
     _pimpl->fleet_state_update_timer = nullptr;
   }
 
+  return *this;
+}
+
+//==============================================================================
+FleetUpdateHandle& FleetUpdateHandle::set_update_listener(
+  std::function<void(const nlohmann::json&)> listener)
+{
+  std::unique_lock<std::mutex> lock(*_pimpl->update_callback_mutex);
+  _pimpl->update_callback = std::move(listener);
   return *this;
 }
 

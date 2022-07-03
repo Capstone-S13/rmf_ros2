@@ -155,8 +155,8 @@ public:
 
         RCLCPP_INFO(
           node->get_logger(),
-          "Mirror handling new sync of %d queries "
-          "from schedule node version [%ld]",
+          "Mirror handling new sync of %lu queries "
+          "from schedule node version [%lu]",
           msg->queries.size(),
           msg->node_version);
 
@@ -278,7 +278,7 @@ public:
     {
       RCLCPP_DEBUG(
         node->get_logger(),
-        "  Processing stashed query for DB update %d",
+        "  Processing stashed query for DB update %lu",
         msg->patch.latest_version);
       // TODO(Geoff): If somehow require_query_validation gets set back to true
       // while processing this loop, it will enter an infinite loop. Add a
@@ -308,8 +308,8 @@ public:
     {
       RCLCPP_WARN(
         node->get_logger(),
-        "Received query update from unexpected schedule node version %d (<%d);"
-        " ignoring update",
+        "Received query update from unexpected schedule node version %lu "
+        "(<%lu); ignoring update",
         msg->node_version,
         expected_node_version);
       return;
@@ -318,8 +318,8 @@ public:
     {
       RCLCPP_WARN(
         node->get_logger(),
-        "Received query update from unexpected schedule node version %d (>%d);"
-        " validating query registration",
+        "Received query update from unexpected schedule node version %lu "
+        "(>%lu); validating query registration",
         msg->node_version,
         expected_node_version);
       require_query_validation = true;
@@ -337,7 +337,7 @@ public:
       // Stash this query update until the query has been verified as correct
       RCLCPP_DEBUG(
         node->get_logger(),
-        "Stashing suspect query for DB version %d",
+        "Stashing suspect query for DB version %lu",
         msg->patch.latest_version);
       stashed_query_updates.push_back(msg);
       return;
@@ -355,7 +355,7 @@ public:
         {
           RCLCPP_WARN(
             node->get_logger(),
-            "Failed to update using patch for DB version %d; "
+            "Failed to update using patch for DB version %lu; "
             "requesting new update",
             patch.latest_version());
           request_update(mirror->latest_version());
@@ -367,7 +367,7 @@ public:
         {
           RCLCPP_WARN(
             node->get_logger(),
-            "Failed to update using patch for DB version %d; "
+            "Failed to update using patch for DB version %lu; "
             "requesting new update",
             patch.latest_version());
           request_update(mirror->latest_version());
@@ -408,12 +408,6 @@ public:
     {
       request.version = minimum_version.value();
       request.full_update = false;
-//      RCLCPP_INFO(
-//        node->get_logger(),
-//        "[rmf_traffic_ros2::MirrorManager::request_update] Requesting changes "
-//        "for query ID [%ld] since version [%ld]",
-//        request.query_id,
-//        request.version);
     }
     else
     {
@@ -428,7 +422,7 @@ public:
 
     request_changes_client->async_send_request(
       std::make_shared<RequestChanges::Request>(request),
-      [&](const RequestChangesFuture response)
+      [this, minimum_version](const RequestChangesFuture response)
       {
         // Check how the schedule node handled the request. The actual queries
         // update will come separately over the query update topic; this is
@@ -437,6 +431,33 @@ public:
         if (value.result == RequestChanges::Response::UNKNOWN_QUERY_ID)
         {
           redo_query_registration();
+        }
+        else if (value.result == RequestChanges::Response::ERROR)
+        {
+          const auto node = weak_node.lock();
+          if (node)
+          {
+            if (minimum_version.has_value())
+            {
+              RCLCPP_ERROR(
+                node->get_logger(),
+                "[MirrorManager::request_update] Failed to request an update "
+                "for query ID [%ld] up from version [%lu]. Error message: %s",
+                query_id,
+                minimum_version.value(),
+                value.error.c_str());
+            }
+            else
+            {
+              RCLCPP_ERROR(
+                node->get_logger(),
+                "[MirrorManager::request_updpate] Failed to request an update "
+                "for query ID [%ld] from the beginning of recorded history. "
+                "Error message: %s",
+                query_id,
+                value.error.c_str());
+            }
+          }
         }
       });
   }
@@ -494,7 +515,7 @@ public:
           this->query_id = msg->query_id;
           RCLCPP_DEBUG(
             node->get_logger(),
-            "Redoing query registration: Got new ID %d",
+            "Redoing query registration: Got new ID %lu",
             query_id);
           setup_update_topics();
           setup_queries_sub();
@@ -602,14 +623,8 @@ auto MirrorManager::Options::update_on_wakeup(bool choice) -> Options&
 }
 
 //==============================================================================
-const rmf_traffic::schedule::Viewer& MirrorManager::viewer() const
-{
-  return *_pimpl->mirror;
-}
-
-//==============================================================================
-std::shared_ptr<rmf_traffic::schedule::Snappable>
-MirrorManager::snapshot_handle() const
+std::shared_ptr<const rmf_traffic::schedule::Mirror>
+MirrorManager::view() const
 {
   return _pimpl->mirror;
 }

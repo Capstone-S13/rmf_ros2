@@ -52,6 +52,7 @@ struct MoveRobot
     ActivePhase(
       agv::RobotContextPtr context,
       std::vector<rmf_traffic::agv::Plan::Waypoint> waypoints,
+      rmf_traffic::PlanId plan_id,
       std::optional<rmf_traffic::Duration> tail_period);
 
     const rxcpp::observable<LegacyTask::StatusMsg>& observe() const override;
@@ -81,6 +82,7 @@ struct MoveRobot
     PendingPhase(
       agv::RobotContextPtr context,
       std::vector<rmf_traffic::agv::Plan::Waypoint> waypoints,
+      rmf_traffic::PlanId plan_id,
       std::optional<rmf_traffic::Duration> tail_period);
 
     std::shared_ptr<LegacyTask::ActivePhase> begin() override;
@@ -93,6 +95,7 @@ struct MoveRobot
 
     agv::RobotContextPtr _context;
     std::vector<rmf_traffic::agv::Plan::Waypoint> _waypoints;
+    rmf_traffic::PlanId _plan_id;
     std::optional<rmf_traffic::Duration> _tail_period;
     std::string _description;
   };
@@ -104,6 +107,7 @@ struct MoveRobot
     Action(
       agv::RobotContextPtr& context,
       std::vector<rmf_traffic::agv::Plan::Waypoint>& waypoints,
+      rmf_traffic::PlanId plan_id,
       std::optional<rmf_traffic::Duration> tail_period);
 
     template<typename Subscriber>
@@ -113,10 +117,10 @@ struct MoveRobot
 
     agv::RobotContextPtr _context;
     std::vector<rmf_traffic::agv::Plan::Waypoint> _waypoints;
+    rmf_traffic::PlanId _plan_id;
     std::optional<rmf_traffic::Duration> _tail_period;
     std::optional<rmf_traffic::Time> _last_tail_bump;
     std::size_t _next_path_index = 0;
-    bool _interrupted = false;
   };
 };
 
@@ -176,6 +180,18 @@ void MoveRobot::Action::operator()(const Subscriber& s)
           + std::to_string(action->_waypoints.size()-1) + "]";
         }
 
+        if (path_index > 0)
+        {
+          const auto& arrival =
+          action->_waypoints[path_index - 1].arrival_checkpoints();
+
+          for (const auto& c : arrival)
+          {
+            action->_context->itinerary()
+            .reached(action->_plan_id, c.route_id, c.checkpoint_id);
+          }
+        }
+
         s.on_next(msg);
       }
 
@@ -184,39 +200,31 @@ void MoveRobot::Action::operator()(const Subscriber& s)
         return;
       }
 
-      const auto current_delay = action->_context->itinerary().delay();
-
-      const rmf_traffic::Time now = action->_context->now();
-      const auto planned_time = action->_waypoints[path_index].time();
-      const auto previously_expected_arrival = planned_time + current_delay;
-      const auto newly_expected_arrival = now + estimate;
-
-      const auto new_delay = [&]() -> rmf_traffic::Duration
+      const auto& target_wp = action->_waypoints[path_index];
+      const auto& itinerary = action->_context->itinerary().itinerary();
+      for (const auto& progress : target_wp.progress_checkpoints())
       {
-        if (newly_expected_arrival < planned_time)
+        for (const auto& c : progress.checkpoints)
         {
-          // If the robot is running ahead of time, we should actually fall back
-          // to the original timing prediction, with the assumption that the
-          // robot will stop and wait at the waypoint after arriving.
-          return planned_time - previously_expected_arrival;
-        }
+          const auto& c_wp =
+          itinerary[c.route_id].trajectory()[c.checkpoint_id];
 
-        // Otherwise we will adjust the time to match up with the latest
-        // expectations
-        return newly_expected_arrival - previously_expected_arrival;
-      } ();
-
-      if (!action->_interrupted)
-      {
-        if (const auto max_delay = action->_context->maximum_delay())
-        {
-          if (*max_delay < current_delay + new_delay)
+          if (estimate < target_wp.time() - c_wp.time())
           {
-            action->_interrupted = true;
-            action->_context->trigger_interrupt();
+            action->_context->itinerary()
+            .reached(action->_plan_id, c.route_id, c.checkpoint_id);
           }
         }
       }
+
+      const auto current_delay = action->_context->itinerary().delay();
+
+      const rmf_traffic::Time now = action->_context->now();
+      const auto planned_time = target_wp.time();
+      const auto previously_expected_arrival = planned_time + current_delay;
+      const auto newly_expected_arrival = now + estimate;
+      const auto new_delay =
+      newly_expected_arrival - previously_expected_arrival;
 
       if (std::chrono::milliseconds(500).count() < std::abs(new_delay.count()))
       {
@@ -227,8 +235,17 @@ void MoveRobot::Action::operator()(const Subscriber& s)
           });
       }
     },
-    [s]()
+    [s, w = weak_from_this()]()
     {
+      if (const auto self = w.lock())
+      {
+        for (const auto& c : self->_waypoints.back().arrival_checkpoints())
+        {
+          self->_context->itinerary().reached(
+            self->_plan_id, c.route_id, c.checkpoint_id);
+        }
+      }
+
       LegacyTask::StatusMsg msg;
       msg.state = LegacyTask::StatusMsg::STATE_COMPLETED;
       msg.status = "move robot success";

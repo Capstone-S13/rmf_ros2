@@ -192,6 +192,18 @@ public:
     std::vector<std::string> labels,
     std::function<void()> robot_is_interrupted);
 
+  /// Cancel a task for this robot. Returns true if the task was being managed
+  /// by this task manager, or false if it was not.
+  bool cancel_task(
+    const std::string& task_id,
+    std::vector<std::string> labels);
+
+  /// Kill a task for this robot. Returns true if the task was being managed by
+  /// this task manager, or false if it was not.
+  bool kill_task(
+    const std::string& task_id,
+    std::vector<std::string> labels);
+
 private:
 
   TaskManager(
@@ -296,7 +308,7 @@ private:
   bool _emergency_active = false;
   std::optional<std::string> _emergency_pullover_interrupt_token;
   ActiveTask _emergency_pullover;
-  uint64_t _count_emergency_pullover = 0;
+  uint16_t _count_emergency_pullover = 0;
   // Queue for dispatched tasks
   std::vector<Assignment> _queue;
   // An ID to keep track of the FIFO order of direct tasks
@@ -310,7 +322,8 @@ private:
   /// This phase will kick in automatically when no task is being executed. It
   /// will ensure that the agent continues to respond to traffic negotiations so
   /// it does not become a blocker for other traffic participants.
-  std::shared_ptr<LegacyTask::ActivePhase> _waiting;
+  ActiveTask _waiting;
+  uint16_t _count_waiting = 0;
 
   // TODO: Eliminate the need for a mutex by redesigning the use of the task
   // manager so that modifications of shared data only happen on designated
@@ -386,6 +399,8 @@ private:
   /// Resume whatever the task manager should be doing
   void _resume_from_emergency();
 
+  std::function<void()> _make_resume_from_waiting();
+
   /// Get the current state of the robot
   rmf_task::State _get_state() const;
 
@@ -395,8 +410,30 @@ private:
   /// Publish the current task state
   void _publish_task_state();
 
+  /// Publish one of the pending tasks
+  rmf_task::State _publish_pending_task(
+    const Assignment& assignment,
+    rmf_task::State expected_state,
+    const rmf_task::Parameters& parameters);
+
   /// Publish the current pending task list
   void _publish_task_queue();
+
+  void _publish_canceled_pending_task(
+    const Assignment& assignment,
+    std::vector<std::string> labels);
+
+  /// Cancel a task that is in the dispatch queue. Returns false if the task
+  /// was not present.
+  bool _cancel_task_from_dispatch_queue(
+    const std::string& task_id,
+    const std::vector<std::string>& labels);
+
+  /// Cancel a task that is in the direct queue. Returns false if the task was
+  /// not present.
+  bool _cancel_task_from_direct_queue(
+    const std::string& task_id,
+    const std::vector<std::string>& labels);
 
   /// Schema loader for validating jsons
   void _schema_loader(

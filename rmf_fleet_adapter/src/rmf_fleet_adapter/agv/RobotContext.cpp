@@ -93,7 +93,7 @@ const rmf_traffic::schedule::Participant& RobotContext::itinerary() const
 }
 
 //==============================================================================
-auto RobotContext::schedule() const -> const std::shared_ptr<const Snappable>&
+auto RobotContext::schedule() const -> const std::shared_ptr<const Mirror>&
 {
   return _schedule;
 }
@@ -196,13 +196,13 @@ bool RobotContext::is_stubborn() const
 
 //==============================================================================
 const rxcpp::observable<RobotContext::Empty>&
-RobotContext::observe_interrupt() const
+RobotContext::observe_replan_request() const
 {
   return _interrupt_obs;
 }
 
 //==============================================================================
-void RobotContext::trigger_interrupt()
+void RobotContext::request_replan()
 {
   if (const auto c = command())
     c->stop();
@@ -369,11 +369,11 @@ void RobotContext::respond(
   const TableViewerPtr& table_viewer,
   const ResponderPtr& responder)
 {
-  if (_negotiator)
+  if (_negotiator && !is_stubborn())
     return _negotiator->respond(table_viewer, responder);
 
-  // If there is no negotiator assigned for this robot, then use a
-  // StubbornNegotiator.
+  // If there is no negotiator assigned for this robot or the stubborn mode has
+  // been requested, then use a StubbornNegotiator.
   //
   // TODO(MXG): Consider if this should be scheduled on a separate thread
   // instead of executed immediately. The StubbornNegotiator doesn't do any
@@ -393,6 +393,18 @@ void RobotContext::current_mode(uint32_t mode)
 uint32_t RobotContext::current_mode() const
 {
   return _current_mode;
+}
+
+//==============================================================================
+void RobotContext::override_status(std::optional<std::string> status)
+{
+  _override_status = status;
+}
+
+//==============================================================================
+std::optional<std::string> RobotContext::override_status() const
+{
+  return _override_status;
 }
 
 //==============================================================================
@@ -440,7 +452,7 @@ RobotContext::RobotContext(
   std::shared_ptr<RobotCommandHandle> command_handle,
   std::vector<rmf_traffic::agv::Plan::Start> _initial_location,
   rmf_traffic::schedule::Participant itinerary,
-  std::shared_ptr<const Snappable> schedule,
+  std::shared_ptr<const Mirror> schedule,
   std::shared_ptr<std::shared_ptr<const rmf_traffic::agv::Planner>> planner,
   rmf_task::ConstActivatorPtr activator,
   rmf_task::ConstParametersPtr parameters,
@@ -476,6 +488,7 @@ RobotContext::RobotContext(
   _battery_soc_obs = _battery_soc_publisher.get_observable();
 
   _current_mode = rmf_fleet_msgs::msg::RobotMode::MODE_IDLE;
+  _override_status = std::nullopt;
 
   _action_executor = nullptr;
 }

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2021 Open Source Robotics Foundation
+ * Copyright (C) 2022 Open Source Robotics Foundation
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -15,43 +15,35 @@
  *
 */
 
-#ifndef SRC__RMF_FLEET_ADAPTER__EVENTS__EMERGENCYPULLOVER_HPP
-#define SRC__RMF_FLEET_ADAPTER__EVENTS__EMERGENCYPULLOVER_HPP
+#ifndef SRC__RMF_FLEET_ADAPTER__EVENTS__WAITUNTIL_HPP
+#define SRC__RMF_FLEET_ADAPTER__EVENTS__WAITUNTIL_HPP
 
 #include "../agv/RobotContext.hpp"
-#include "../Negotiator.hpp"
 
-#include "../services/FindEmergencyPullover.hpp"
-
-#include "ExecutePlan.hpp"
+#include <rmf_task/events/SimpleEventState.hpp>
 
 #include <rmf_task_sequence/Event.hpp>
-#include <rmf_task/events/SimpleEventState.hpp>
+#include <rmf_task_sequence/events/WaitFor.hpp>
 
 namespace rmf_fleet_adapter {
 namespace events {
 
 //==============================================================================
-class EmergencyPullover : public rmf_task_sequence::Event
+class WaitUntil : public rmf_task_sequence::Event
 {
 public:
-
-  static rmf_task::Task::ActivePtr start(
-    const std::string& task_id,
-    agv::RobotContextPtr& context,
-    std::function<void(rmf_task::Phase::ConstSnapshotPtr)> update,
-    std::function<void()> finished);
 
   class Standby : public rmf_task_sequence::Event::Standby
   {
   public:
 
     static std::shared_ptr<Standby> make(
+      agv::RobotContextPtr context,
+      rmf_traffic::Time until_time,
       const AssignIDPtr& id,
-      const agv::RobotContextPtr& context,
       std::function<void()> update);
 
-    ConstStatePtr state() const;
+    ConstStatePtr state() const final;
 
     rmf_traffic::Duration duration_estimate() const final;
 
@@ -60,13 +52,10 @@ public:
       std::function<void()> finished) final;
 
   private:
-
-    AssignIDPtr _assign_id;
     agv::RobotContextPtr _context;
-    std::function<void()> _update;
+    rmf_traffic::Time _until_time;
     rmf_task::events::SimpleEventStatePtr _state;
-    ActivePtr _active = nullptr;
-
+    std::function<void()> _update;
   };
 
   class Active
@@ -76,8 +65,8 @@ public:
   public:
 
     static std::shared_ptr<Active> make(
-      const AssignIDPtr& id,
       agv::RobotContextPtr context,
+      const rmf_traffic::Time until_time,
       rmf_task::events::SimpleEventStatePtr state,
       std::function<void()> update,
       std::function<void()> finished);
@@ -95,41 +84,24 @@ public:
     void kill() final;
 
   private:
-
-    void _schedule_retry();
-
-    void _find_plan();
-
-    void _execute_plan(
-      rmf_traffic::PlanId plan_id,
-      rmf_traffic::agv::Plan plan,
-      rmf_traffic::schedule::Itinerary full_itinerary);
-
-    Negotiator::NegotiatePtr _respond(
-      const Negotiator::TableViewerPtr& table_view,
-      const Negotiator::ResponderPtr& responder);
-
-    AssignIDPtr _assign_id;
     agv::RobotContextPtr _context;
+    rmf_traffic::Time _until_time;
+    rmf_task::events::SimpleEventStatePtr _state;
     std::function<void()> _update;
     std::function<void()> _finished;
-    rmf_task::events::SimpleEventStatePtr _state;
-    std::shared_ptr<Negotiator> _negotiator;
-    std::optional<ExecutePlan> _execution;
-    std::shared_ptr<services::FindEmergencyPullover> _find_pullover_service;
-    rmf_rxcpp::subscription_guard _pullover_subscription;
-    rclcpp::TimerBase::SharedPtr _find_pullover_timeout;
-    rclcpp::TimerBase::SharedPtr _retry_timer;
-
+    std::optional<Eigen::Vector3d> _last_position;
+    rclcpp::TimerBase::SharedPtr _timer;
     bool _is_interrupted = false;
-  };
 
-private:
-  static rmf_task::Activator _make_activator(
-    std::function<rmf_traffic::Time()> clock);
+    void _update_waiting();
+
+    void _update_holding(
+      rmf_traffic::Time now,
+      Eigen::Vector3d position);
+  };
 };
 
 } // namespace events
 } // namespace rmf_fleet_adapter
 
-#endif // SRC__RMF_FLEET_ADAPTER__EVENTS__EMERGENCYPULLOVER_HPP
+#endif // SRC__RMF_FLEET_ADAPTER__EVENTS__WAITUNTIL_HPP
