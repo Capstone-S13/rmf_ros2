@@ -505,6 +505,7 @@ public:
           _travel_info.updater->unstable().get_participant())
         {
           participant->set(
+            participant->assign_plan_id(),
             {rmf_traffic::Route{state.location.level_name, trajectory}});
           _dock_schedule_time = now;
         }
@@ -521,6 +522,7 @@ public:
   void set_updater(rmf_fleet_adapter::agv::RobotUpdateHandlePtr updater)
   {
     _travel_info.updater = std::move(updater);
+    std::string robot_name = _travel_info.robot_name;
 
     using ActionExecutor =
       rmf_fleet_adapter::agv::RobotUpdateHandle::ActionExecutor;
@@ -551,7 +553,7 @@ public:
 
     // set the action_executor to collect from a store
     const auto unit_collect_executor =
-      [w = weak_from_this()](
+      [w = weak_from_this(), name = robot_name](
         const std::string&,
         const nlohmann::json& description,
         ActionExecution execution)
@@ -570,6 +572,7 @@ public:
 
       // publish message for free fleet support
       nlohmann::json json_msg;
+      json_msg["robot"] = name;
       json_msg["category"] = "unit_collect";
       json_msg["description"] = description;
       auto perform_action_msg = std_msgs::msg::String();
@@ -583,7 +586,7 @@ public:
 
     // set the action_executor to deposit to an unit
     const auto unit_deposit_executor =
-      [w = weak_from_this()](
+      [w = weak_from_this(), name = robot_name](
         const std::string&,
         const nlohmann::json& description,
         ActionExecution execution)
@@ -601,6 +604,7 @@ public:
 
       // publish message for free fleet support
       nlohmann::json json_msg;
+      json_msg["robot"] = name;
       json_msg["category"] = "unit_deposit";
       json_msg["description"] = description;
       auto perform_action_msg = std_msgs::msg::String();
@@ -616,7 +620,7 @@ public:
 
     // action_executor to deposit items to the hub
     const auto hub_deposit_executor =
-      [w = weak_from_this()](
+      [w = weak_from_this(), name = robot_name](
         const std::string&,
         const nlohmann::json& description,
         ActionExecution execution
@@ -640,6 +644,7 @@ public:
 
       // publish message for free fleet support
       nlohmann::json json_msg;
+      json_msg["robot"] = name;
       json_msg["category"] = "hub_deposit";
       json_msg["description"] = description;
       auto perform_action_msg = std_msgs::msg::String();
@@ -653,7 +658,7 @@ public:
 
     // action_executor to collect items from the hub
     const auto hub_collect_executor =
-        [w = weak_from_this()](
+        [w = weak_from_this() , name = robot_name](
             const std::string&,
             const nlohmann::json& description,
             ActionExecution execution
@@ -677,6 +682,7 @@ public:
 
       // publish message for free fleet support
       nlohmann::json json_msg;
+      json_msg["robot"] = name;
       json_msg["category"] = "hub_collect";
       json_msg["description"] = description;
       auto perform_action_msg = std_msgs::msg::String();
@@ -688,10 +694,83 @@ public:
 
     executor_map->emplace("hub_collect", hub_collect_executor);
 
+    // action_executor to deposit items to the hub
+    const auto receive_robot_executor =
+      [w = weak_from_this(), name = robot_name](
+        const std::string&,
+        const nlohmann::json& description,
+        ActionExecution execution
+      )
+    {
+      const auto self = w.lock();
+      if(!self)
+        return;
+      // deposit item to hub
+      // rosservice to dispense to hub
+      // 1. check if space is vaccant for robot
+      // 2. check if space is vaccant for parcel
+      // 3. align robot to hub
+      // 4. drop parcel into pigeon hole
+      auto message = std_msgs::msg::String();
+      std::stringstream info;
+      info << "ejecting robot" << name << "to hub";
+      message.data =  info.str();
+      self->_hello_pub->publish(message);
+
+      // publish message for free fleet support
+      nlohmann::json json_msg;
+      json_msg["robot"] = name;
+      json_msg["category"] = "receive_robot";
+      json_msg["description"] = description;
+      auto perform_action_msg = std_msgs::msg::String();
+      perform_action_msg.data = json_msg.dump();
+      self->_perform_action_pub->publish(perform_action_msg);
+
+      self->set_action_execution(execution);
+    };
+
+    executor_map->emplace("receive_robot", receive_robot_executor);
+
+    // action_executor to deposit items to the hub
+    const auto eject_robot_executor =
+      [w = weak_from_this(), name = robot_name](
+        const std::string&,
+        const nlohmann::json& description,
+        ActionExecution execution
+      )
+    {
+      const auto self = w.lock();
+      if(!self)
+        return;
+      // deposit item to hub
+      // rosservice to dispense to hub
+      // 1. check if space is vaccant for robot
+      // 2. check if space is vaccant for parcel
+      // 3. align robot to hub
+      // 4. drop parcel into pigeon hole
+      auto message = std_msgs::msg::String();
+      std::stringstream info;
+      info << "ejecting robot" << name << "to hub";
+      message.data =  info.str();
+      self->_hello_pub->publish(message);
+
+      // publish message for free fleet support
+      nlohmann::json json_msg;
+      json_msg["robot"] = name;
+      json_msg["category"] = "eject_robot";
+      json_msg["description"] = description;
+      auto perform_action_msg = std_msgs::msg::String();
+      perform_action_msg.data = json_msg.dump();
+      self->_perform_action_pub->publish(perform_action_msg);
+
+      self->set_action_execution(execution);
+    };
+
+    executor_map->emplace("receive_robot", receive_robot_executor);
 
     // set additional hello action executor for the robot
     const auto hello_executor =
-      [w = weak_from_this()](
+      [w = weak_from_this() , name = robot_name](
       const std::string&,
       const nlohmann::json&,
       ActionExecution execution)
@@ -901,15 +980,15 @@ private:
 
   uint32_t _current_task_id = 0;
 
-  std::mutex _mutex;
+  std::recursive_mutex _mutex;
 
   // ActionExecution for managing multiple actions
   std::optional<ActionExecution> _action_execution = std::nullopt;
 
 
-  std::unique_lock<std::mutex> _lock()
+  std::unique_lock<std::recursive_mutex> _lock()
   {
-    std::unique_lock<std::mutex> lock(_mutex, std::defer_lock);
+    std::unique_lock<std::recursive_mutex> lock(_mutex, std::defer_lock);
     while (!lock.try_lock())
     {
       // Intentionally busy wait
@@ -1114,10 +1193,10 @@ struct Connections : public std::enable_shared_from_this<Connections>
       });
   }
 
-  std::mutex _mutex;
-  std::unique_lock<std::mutex> lock()
+  std::recursive_mutex _mutex;
+  std::unique_lock<std::recursive_mutex> lock()
   {
-    std::unique_lock<std::mutex> l(_mutex, std::defer_lock);
+    std::unique_lock<std::recursive_mutex> l(_mutex, std::defer_lock);
     while (!l.try_lock())
     {
       // Intentionally busy wait
@@ -1177,7 +1256,7 @@ std::shared_ptr<Connections> make_fleet(
     node->declare_parameter("server_uri", std::string());
   if (!uri.empty())
   {
-    RCLCPP_ERROR(
+    RCLCPP_INFO(
       node->get_logger(),
       "API server URI: [%s]", uri.c_str());
 
@@ -1519,6 +1598,7 @@ std::shared_ptr<Connections> make_fleet(
     "hub_collect",
     consider_hub_collect);
 
+
   // Configure fleet to deposit to hub
   const auto consider_hub_deposit =
     [](const nlohmann::json& /*description*/,
@@ -1530,6 +1610,31 @@ std::shared_ptr<Connections> make_fleet(
   connections->fleet->add_performable_action(
     "hub_deposit",
     consider_hub_deposit);
+
+  // Configure fleet to receive robots
+  const auto consider_receive_robot =
+    [](const nlohmann::json& /*description*/,
+      rmf_fleet_adapter::agv::FleetUpdateHandle::Confirmation& confirm)
+    {
+      confirm.accept();
+    };
+
+  connections->fleet->add_performable_action(
+    "receive_robot",
+    consider_receive_robot);
+
+  // Configure fleet to eject robots
+  const auto consider_eject_robot =
+    [](const nlohmann::json& /*description*/,
+      rmf_fleet_adapter::agv::FleetUpdateHandle::Confirmation& confirm)
+    {
+      confirm.accept();
+    };
+
+  connections->fleet->add_performable_action(
+    "eject_robot",
+    consider_eject_robot);
+
 
   if (node->declare_parameter<bool>("disable_delay_threshold", false))
   {
